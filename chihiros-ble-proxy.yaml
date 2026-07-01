@@ -478,12 +478,34 @@ datetime:
 # Each channel (R, G, B) is an independent brightness-only dimmer.
 # Turning a channel on/off or adjusting brightness switches to manual mode and
 # triggers a BLE write with all three channel levels sent together.
-light:
+# The float outputs below don't drive any hardware — the channel level is read
+# back from the light's current_values when the BLE connection is established
+# (see chihiros_light on_connect) — so their write_action is a no-op.
+output:
   - platform: template
+    id: light_ch_r_output
+    type: float
+    write_action:
+      - lambda: return;
+
+  - platform: template
+    id: light_ch_g_output
+    type: float
+    write_action:
+      - lambda: return;
+
+  - platform: template
+    id: light_ch_b_output
+    type: float
+    write_action:
+      - lambda: return;
+
+light:
+  - platform: monochromatic
     id: light_ch_r
     name: "WRGB2 Red channel"
+    output: light_ch_r_output
     restore_mode: RESTORE_DEFAULT_OFF
-    color_mode: BRIGHTNESS
     turn_on_action:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
@@ -491,11 +513,11 @@ light:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
 
-  - platform: template
+  - platform: monochromatic
     id: light_ch_g
     name: "WRGB2 Green channel"
+    output: light_ch_g_output
     restore_mode: RESTORE_DEFAULT_OFF
-    color_mode: BRIGHTNESS
     turn_on_action:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
@@ -503,11 +525,11 @@ light:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
 
-  - platform: template
+  - platform: monochromatic
     id: light_ch_b
     name: "WRGB2 Blue channel"
+    output: light_ch_b_output
     restore_mode: RESTORE_DEFAULT_OFF
-    color_mode: BRIGHTNESS
     turn_on_action:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
