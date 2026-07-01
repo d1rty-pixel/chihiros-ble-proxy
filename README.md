@@ -149,8 +149,15 @@ The full protocol implementation is in `components/chihiros_ble/chihiros_ble.h`.
 **HCI 0x07 Memory Full errors in logs**
 - Happens when multiple BLE connects are attempted simultaneously. The firmware staggers connects automatically. If it persists, increase the delays in `schedule_debounce_both`.
 
-**WRGB2 light doesn't respond**
-- The WRGB2 uses BLE name prefix `DYNT90` or `DYSIL`. If your unit uses a different prefix, check the ESP32 log or `scan_ble.py` output and update the prefix check in the `on_ble_advertise` lambda.
+**Device not recognized / wrong BLE name prefix**
+- Chihiros occasionally ships devices under new BLE name prefixes (e.g. a new WRGB2 variant advertising as `DYNEW` instead of `DYNT90`). If a device is powered on and in range but neither `scan_ble.py` nor the ESP32 logs identify it as a Chihiros device, check the raw BLE name shown in the scanner and compare it against the prefix lists in two places:
+  1. `scan_ble.py` — the `CHIHIROS_PREFIXES` dict near the top of the file
+  2. `chihiros-ble-proxy.yaml` — the `on_ble_advertise` lambda (one `rfind` check per device type)
+- Add the new prefix to both, then re-flash and re-run the scanner.
+
+## Credits
+
+Protocol implementation and device knowledge based on [chihiros-esphome](https://github.com/BartdeJonge/chihiros-esphome) by Bart de Jonge.
 
 ## License
 
