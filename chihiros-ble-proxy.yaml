@@ -1,0 +1,1762 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chihiros BLE Proxy — ESPHome config for ESP32-S3
+#
+# Controls Chihiros aquarium devices via BLE and exposes them to Home Assistant.
+# All devices are autonomous: they store their own schedule and run without the
+# ESP32. BLE is only needed to push config changes or read sensor data.
+#
+# Supported devices:
+#   CO2 controller  (DYPCO2…)
+#   Magnetic stirrer 4-channel  (DYMIX…)
+#   WRGB II LED light  (DYNT90…)
+#   Dosing pump 4-channel  (DYDOSE…)
+#   Cooling fan  (DYNFAN…)     ← OPTIONAL — disable section if not used
+#   Doctor Mate  (DYNDOC…)     ← OPTIONAL — disable section if not used
+#
+# Setup:
+#   1. cp secrets.yaml.example secrets.yaml  — fill in WiFi + OTA credentials
+#   2. Set the MAC addresses below for your devices (scan with BLE scanner app,
+#      or flash this firmware and check logs — unknown Chihiros devices are logged)
+#   3. esphome run chihiros-ble-proxy.yaml
+# ═══════════════════════════════════════════════════════════════════════════════
+
+substitutions:
+  name: chihiros-ble-proxy
+  friendly_name: Chihiros BLE Proxy
+
+  # ── Device MAC addresses ───────────────────────────────────────────────────
+  # Default: 00:00:00:00:00:00 = auto-discovery.
+  # The ESP32 connects to the first Chihiros device of the matching type it finds
+  # in BLE advertisements. This works as long as you have at most one device of
+  # each type within BLE range.
+  # If you have multiple devices of the same type (e.g. two lights), pin the one
+  # you want by setting its MAC here. Use scan_ble.py on the host to find MACs.
+  co2_mac:      "00:00:00:00:00:00"
+  stirrer_mac:  "00:00:00:00:00:00"
+  light_mac:    "00:00:00:00:00:00"
+  dosing_mac:   "00:00:00:00:00:00"
+  fan_mac:      "00:00:00:00:00:00"
+  doctor_mac:   "00:00:00:00:00:00"
+
+  # ── Module enable flags ────────────────────────────────────────────────────
+  # Set to "false" to disable a module entirely (no BLE connect, no HA entities).
+  # A module with MAC = 00:00:00:00:00:00 and enabled = "true" will auto-discover.
+  co2_enabled:     "false"
+  stirrer_enabled: "true"
+  light_enabled:   "true"
+  dosing_enabled:  "true"
+  fan_enabled:     "true"
+  doctor_enabled:  "false"
+
+  # ── Nordic UART Service UUIDs — same for all Chihiros devices ─────────────
+  ble_service: "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+  ble_tx:      "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+  ble_rx:      "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+
+# ── Custom component ──────────────────────────────────────────────────────────
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [chihiros_ble]
+
+chihiros_ble:
+
+# ── Device base ───────────────────────────────────────────────────────────────
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_BT_CTRL_BLE_MAX_ACT: "10"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  post_connect_roaming: false
+  reboot_timeout: 0s
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: DEBUG
+    ble_client: DEBUG
+
+api:
+  encryption:
+    key: !secret encryption_key
+  on_client_connected:
+    - lambda: id(ha_connected) = true;
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+time:
+  - platform: sntp
+    id: ntp_time
+    timezone: CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+
+esp32_ble:
+  io_capability: none
+  max_connections: 8
+
+# Scans for Chihiros BLE advertisements.
+# Unknown Chihiros devices (not in your MAC list above) are logged so you can
+# identify them and fill in their MAC address.
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    interval: 320ms
+    window: 60ms
+    continuous: true
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            std::string name = x.get_name();
+            std::string mac = x.address_str();
+            if (name.rfind("DY", 0) != 0) return;
+            uint64_t addr = x.address();
+            // Auto-discovery: if a module is enabled but has no MAC configured,
+            // adopt the first matching advertisement and connect immediately.
+            if (${co2_enabled} && strcmp("${co2_mac}", "00:00:00:00:00:00") == 0 &&
+                !id(co2_auto_found) && name.rfind("DYPCO2", 0) == 0) {
+                id(chihiros_co2).set_address(addr);
+                id(co2_auto_found) = true;
+                id(co2_connection).turn_on();
+                ESP_LOGI("ble_scan", "Auto-discovered CO2 controller: %s", mac.c_str());
+                return;
+            }
+            if (${stirrer_enabled} && strcmp("${stirrer_mac}", "00:00:00:00:00:00") == 0 &&
+                !id(stirrer_auto_found) && name.rfind("DYMIX", 0) == 0) {
+                id(chihiros_stirrer).set_address(addr);
+                id(stirrer_auto_found) = true;
+                id(stirrer_connection).turn_on();
+                ESP_LOGI("ble_scan", "Auto-discovered Stirrer: %s", mac.c_str());
+                return;
+            }
+            if (${light_enabled} && strcmp("${light_mac}", "00:00:00:00:00:00") == 0 &&
+                !id(light_auto_found) &&
+                (name.rfind("DYNT90", 0) == 0 || name.rfind("DYSIL", 0) == 0)) {
+                id(chihiros_light).set_address(addr);
+                id(light_auto_found) = true;
+                id(light_connection).turn_on();
+                ESP_LOGI("ble_scan", "Auto-discovered WRGB2 light: %s", mac.c_str());
+                return;
+            }
+            if (${dosing_enabled} && strcmp("${dosing_mac}", "00:00:00:00:00:00") == 0 &&
+                !id(dosing_auto_found) && name.rfind("DYDOSE", 0) == 0) {
+                id(chihiros_dosing).set_address(addr);
+                id(dosing_auto_found) = true;
+                id(dosing_connection).turn_on();
+                ESP_LOGI("ble_scan", "Auto-discovered Dosing pump: %s", mac.c_str());
+                return;
+            }
+            if (${fan_enabled} && strcmp("${fan_mac}", "00:00:00:00:00:00") == 0 &&
+                !id(fan_auto_found) && name.rfind("DYNFAN", 0) == 0) {
+                id(chihiros_fan).set_address(addr);
+                id(fan_auto_found) = true;
+                id(fan_connection).turn_on();
+                ESP_LOGI("ble_scan", "Auto-discovered Fan: %s", mac.c_str());
+                return;
+            }
+            if (${doctor_enabled} && strcmp("${doctor_mac}", "00:00:00:00:00:00") == 0 &&
+                !id(doctor_auto_found) && name.rfind("DYNDOC", 0) == 0) {
+                id(chihiros_doctor).set_address(addr);
+                id(doctor_auto_found) = true;
+                id(doctor_connection).turn_on();
+                ESP_LOGI("ble_scan", "Auto-discovered Doctor Mate: %s", mac.c_str());
+                return;
+            }
+            // Skip devices that are already configured by MAC
+            if (mac == "${co2_mac}"     || mac == "${stirrer_mac}" ||
+                mac == "${light_mac}"   || mac == "${dosing_mac}"  ||
+                mac == "${fan_mac}"     || mac == "${doctor_mac}") return;
+            // Skip auto-discovered devices (no static MAC, but already found)
+            if (id(co2_auto_found)     && name.rfind("DYPCO2", 0) == 0) return;
+            if (id(stirrer_auto_found) && name.rfind("DYMIX",  0) == 0) return;
+            if (id(light_auto_found)   && (name.rfind("DYNT90", 0) == 0 || name.rfind("DYSIL", 0) == 0)) return;
+            if (id(dosing_auto_found)  && name.rfind("DYDOSE", 0) == 0) return;
+            if (id(fan_auto_found)     && name.rfind("DYNFAN", 0) == 0) return;
+            if (id(doctor_auto_found)  && name.rfind("DYNDOC", 0) == 0) return;
+            // Log any other Chihiros device so the user can identify and configure it
+            const char* type = "Unknown type";
+            if      (name.rfind("DYNT90", 0) == 0 || name.rfind("DYSIL", 0) == 0) type = "WRGB2 light       -> set as light_mac";
+            else if (name.rfind("DYPCO2", 0) == 0) type = "CO2 controller    -> set as co2_mac";
+            else if (name.rfind("DYMIX",  0) == 0) type = "Magnetic stirrer  -> set as stirrer_mac";
+            else if (name.rfind("DYNFAN", 0) == 0) type = "Cooling fan       -> set as fan_mac";
+            else if (name.rfind("DYNDOC", 0) == 0) type = "Doctor Mate       -> set as doctor_mac";
+            else if (name.rfind("DYDOSE", 0) == 0) type = "Dosing pump       -> set as dosing_mac";
+            ESP_LOGI("ble_scan", "Chihiros found: %s | MAC=%s RSSI=%d",
+              type, mac.c_str(), x.get_rssi());
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+globals:
+  # HA connection state — only push BLE config while HA is connected
+  - id: ha_connected
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  # Light period — shared by CO2 and WRGB2 light
+  - id: co2_schedule_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+  - id: co2_device
+    type: chihiros::CO2Device
+    restore_value: false
+
+  # Stirrer channel on/off state (persisted — survives ESP32 crashes)
+  # After a BLE-stack crash the ESP32 restores these from flash so HA sees the
+  # correct state even before the next BLE reconnect.
+  - id: stirrer_ch0_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: stirrer_ch1_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: stirrer_ch2_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: stirrer_ch3_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: stirrer_device
+    type: chihiros::RoerderDevice
+    restore_value: false
+
+  # Light
+  - id: light_auto_mode
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+  - id: light_device
+    type: chihiros::WRGB2Device
+    restore_value: false
+
+  # Dosing
+  - id: dosing_device
+    type: chihiros::DosingDevice
+    restore_value: false
+
+  # Fan (OPTIONAL)
+  - id: fan_silent_mode
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: fan_device
+    type: chihiros::VentilatorDevice
+    restore_value: false
+
+  # Doctor Mate (OPTIONAL)
+  - id: doctor_device
+    type: chihiros::DoctorDevice
+    restore_value: false
+
+  # Auto-discovery flags — set when a device is found via BLE scan (no MAC configured).
+  # Reset on reboot; the next advertisement will trigger re-discovery.
+  - id: co2_auto_found
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: stirrer_auto_found
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: light_auto_found
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: dosing_auto_found
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: fan_auto_found
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: doctor_auto_found
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIGHT PERIOD SCHEDULE
+# Central timeline that CO2 and the WRGB2 light follow:
+#   CO2 on:   light_period_start − co2_pre_start_minutes
+#   CO2 off:  light_period_end
+#   Light on: light_period_start
+#   Light off: light_period_end
+# ═══════════════════════════════════════════════════════════════════════════════
+
+script:
+  # Update both CO2 and light — staggered to avoid simultaneous BLE connects
+  # (simultaneous connects cause HCI 0x07 Memory Full errors)
+  - id: schedule_debounce_both
+    mode: restart
+    then:
+      - delay: 1500ms
+      - script.execute: co2_connect_if_ready
+      - delay: 3000ms
+      - script.execute: light_connect_if_ready
+
+  - id: schedule_debounce_co2
+    mode: restart
+    then:
+      - delay: 1500ms
+      - script.execute: co2_connect_if_ready
+
+  # ── CO2 scripts ─────────────────────────────────────────────────────────────
+  - id: co2_connect_if_ready
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${co2_enabled} &&
+                    (strcmp("${co2_mac}", "00:00:00:00:00:00") != 0 || id(co2_auto_found));
+          then:
+            - switch.turn_on: co2_connection
+
+  # ── Stirrer scripts ──────────────────────────────────────────────────────────
+  - id: stirrer_connect_if_ready
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${stirrer_enabled} &&
+                    (strcmp("${stirrer_mac}", "00:00:00:00:00:00") != 0 || id(stirrer_auto_found));
+          then:
+            - switch.turn_on: stirrer_connection
+
+  # ── Light scripts ────────────────────────────────────────────────────────────
+  - id: light_connect_if_ready
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${light_enabled} &&
+                    (strcmp("${light_mac}", "00:00:00:00:00:00") != 0 || id(light_auto_found));
+          then:
+            - switch.turn_on: light_connection
+
+  # Only reconnect in manual mode — prevents unnecessary reconnects when sliders change
+  - id: light_connect_if_ready_manual
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${light_enabled} && !id(light_auto_mode) &&
+                    (strcmp("${light_mac}", "00:00:00:00:00:00") != 0 || id(light_auto_found));
+          then:
+            - switch.turn_on: light_connection
+
+  - id: light_debounce_manual
+    mode: restart
+    then:
+      - delay: 1500ms
+      - script.execute: light_connect_if_ready_manual
+
+  # ── Dosing scripts ───────────────────────────────────────────────────────────
+  - id: dosing_connect_if_ready
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${dosing_enabled} &&
+                    (strcmp("${dosing_mac}", "00:00:00:00:00:00") != 0 || id(dosing_auto_found));
+          then:
+            - switch.turn_on: dosing_connection
+
+  - id: dosing_debounce
+    mode: restart
+    then:
+      - delay: 1500ms
+      - script.execute: dosing_connect_if_ready
+
+  # ── Fan scripts ───────────────────────────────────────────────────────────────
+  - id: fan_connect_if_ready
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${fan_enabled} &&
+                    (strcmp("${fan_mac}", "00:00:00:00:00:00") != 0 || id(fan_auto_found));
+          then:
+            - switch.turn_on: fan_connection
+
+  - id: fan_debounce
+    mode: restart
+    then:
+      - delay: 1500ms
+      - script.execute: fan_connect_if_ready
+
+  # ── Doctor Mate scripts ───────────────────────────────────────────────────────
+  - id: doctor_connect_if_ready
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${doctor_enabled} &&
+                    (strcmp("${doctor_mac}", "00:00:00:00:00:00") != 0 || id(doctor_auto_found));
+          then:
+            - switch.turn_on: doctor_connection
+
+  - id: doctor_debounce
+    mode: restart
+    then:
+      - delay: 1500ms
+      - script.execute: doctor_connect_if_ready
+
+# ── Datetime ──────────────────────────────────────────────────────────────────
+datetime:
+  - platform: template
+    id: light_period_start
+    name: "Light period start"
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "14:00:00"
+    icon: mdi:weather-sunset-up
+    on_value:
+      - script.execute: schedule_debounce_both
+
+  - platform: template
+    id: light_period_end
+    name: "Light period end"
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "21:00:00"
+    icon: mdi:weather-sunset-down
+    on_value:
+      - script.execute: schedule_debounce_both
+
+# ── BLE clients ───────────────────────────────────────────────────────────────
+
+ble_client:
+  # ── CO2 ──
+  - mac_address: ${co2_mac}
+    id: chihiros_co2
+    on_connect:
+      then:
+        - delay: 500ms
+        - lambda: |-
+            id(co2_device).prepare(
+              id(ntp_time).now(), id(co2_schedule_enabled),
+              id(light_period_start).hour, id(light_period_start).minute,
+              id(light_period_end).hour,   id(light_period_end).minute,
+              (int)id(co2_pre_start_minutes).state
+            );
+        - while:
+            condition:
+              lambda: return id(co2_device).has_next();
+            then:
+              - ble_client.ble_write:
+                  id: chihiros_co2
+                  service_uuid: ${ble_service}
+                  characteristic_uuid: ${ble_tx}
+                  value: !lambda return id(co2_device).next();
+              - delay: 200ms
+        - switch.turn_off: co2_connection
+        - logger.log: "co2: done"
+    on_disconnect:
+      then:
+        - logger.log: "co2: disconnected"
+
+  # ── Stirrer ──
+  - mac_address: ${stirrer_mac}
+    id: chihiros_stirrer
+    on_connect:
+      then:
+        - delay: 500ms
+        - lambda: |-
+            uint8_t uur[]  = {(uint8_t)id(stirrer_ch0_start_hour).state, (uint8_t)id(stirrer_ch1_start_hour).state,
+                              (uint8_t)id(stirrer_ch2_start_hour).state, (uint8_t)id(stirrer_ch3_start_hour).state};
+            uint8_t min_[] = {(uint8_t)id(stirrer_ch0_start_min).state, (uint8_t)id(stirrer_ch1_start_min).state,
+                              (uint8_t)id(stirrer_ch2_start_min).state, (uint8_t)id(stirrer_ch3_start_min).state};
+            uint8_t vrlp[] = {(uint8_t)id(stirrer_ch0_lead_time).state, (uint8_t)id(stirrer_ch1_lead_time).state,
+                              (uint8_t)id(stirrer_ch2_lead_time).state, (uint8_t)id(stirrer_ch3_lead_time).state};
+            uint8_t spd[]  = {(uint8_t)id(stirrer_ch0_speed).state, (uint8_t)id(stirrer_ch1_speed).state,
+                              (uint8_t)id(stirrer_ch2_speed).state, (uint8_t)id(stirrer_ch3_speed).state};
+            uint8_t dur[]  = {(uint8_t)id(stirrer_ch0_duration).state, (uint8_t)id(stirrer_ch1_duration).state,
+                              (uint8_t)id(stirrer_ch2_duration).state, (uint8_t)id(stirrer_ch3_duration).state};
+            id(stirrer_device).prepare(
+              id(ntp_time).now(), uur, min_, vrlp, spd, dur,
+              id(stirrer_ch0_enabled), id(stirrer_ch1_enabled),
+              id(stirrer_ch2_enabled), id(stirrer_ch3_enabled)
+            );
+        - while:
+            condition:
+              lambda: return id(stirrer_device).has_next();
+            then:
+              - ble_client.ble_write:
+                  id: chihiros_stirrer
+                  service_uuid: ${ble_service}
+                  characteristic_uuid: ${ble_tx}
+                  value: !lambda return id(stirrer_device).next();
+              - delay: 200ms
+        - switch.turn_off: stirrer_connection
+        - logger.log: "stirrer: done"
+    on_disconnect:
+      then:
+        - logger.log: "stirrer: disconnected"
+
+  # ── WRGB2 Light ──
+  - mac_address: ${light_mac}
+    id: chihiros_light
+    on_connect:
+      then:
+        - delay: 500ms
+        - lambda: |-
+            id(light_device).prepare(
+              id(ntp_time).now(), id(light_auto_mode),
+              id(light_period_start).hour, id(light_period_start).minute,
+              id(light_period_end).hour,   id(light_period_end).minute,
+              (uint8_t)id(light_ramp).state,
+              (uint8_t)id(light_schedule_r).state,
+              (uint8_t)id(light_schedule_g).state,
+              (uint8_t)id(light_schedule_b).state
+            );
+        - while:
+            condition:
+              lambda: return id(light_device).has_next();
+            then:
+              - ble_client.ble_write:
+                  id: chihiros_light
+                  service_uuid: ${ble_service}
+                  characteristic_uuid: ${ble_tx}
+                  value: !lambda return id(light_device).next();
+              - delay: 200ms
+        - switch.turn_off: light_connection
+        - logger.log: "light: done"
+    on_disconnect:
+      then:
+        - logger.log: "light: disconnected"
+
+  # ── Dosing pump ──
+  - mac_address: ${dosing_mac}
+    id: chihiros_dosing
+    on_connect:
+      then:
+        - delay: 500ms
+        - lambda: |-
+            bool    actief[]   = {id(sw_dosing_schedule_p1).state, id(sw_dosing_schedule_p2).state,
+                                  id(sw_dosing_schedule_p3).state, id(sw_dosing_schedule_p4).state};
+            uint8_t weekdays[] = {(uint8_t)id(num_dosing_weekdays_p1).state, (uint8_t)id(num_dosing_weekdays_p2).state,
+                                  (uint8_t)id(num_dosing_weekdays_p3).state, (uint8_t)id(num_dosing_weekdays_p4).state};
+            uint8_t uur[]      = {(uint8_t)id(num_dosing_hour_p1).state, (uint8_t)id(num_dosing_hour_p2).state,
+                                  (uint8_t)id(num_dosing_hour_p3).state, (uint8_t)id(num_dosing_hour_p4).state};
+            uint8_t min_[]     = {(uint8_t)id(num_dosing_min_p1).state, (uint8_t)id(num_dosing_min_p2).state,
+                                  (uint8_t)id(num_dosing_min_p3).state, (uint8_t)id(num_dosing_min_p4).state};
+            float   vol[]      = {id(num_dosing_vol_p1).state, id(num_dosing_vol_p2).state,
+                                  id(num_dosing_vol_p3).state, id(num_dosing_vol_p4).state};
+            id(dosing_device).prepare(
+              id(ntp_time).now(), actief, weekdays, uur, min_, vol
+            );
+        - while:
+            condition:
+              lambda: return id(dosing_device).has_next();
+            then:
+              - ble_client.ble_write:
+                  id: chihiros_dosing
+                  service_uuid: ${ble_service}
+                  characteristic_uuid: ${ble_tx}
+                  value: !lambda return id(dosing_device).next();
+              - delay: 200ms
+        - switch.turn_off: dosing_connection
+        - logger.log: "dosing: done"
+    on_disconnect:
+      then:
+        - logger.log: "dosing: disconnected"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPTIONAL: Cooling Fan
+  # Set fan_mac above to enable. Leave as 00:00:00:00:00:00 to skip.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - mac_address: ${fan_mac}
+    id: chihiros_fan
+    on_connect:
+      then:
+        - delay: 500ms
+        - lambda: |-
+            id(fan_device).prepare(
+              id(ntp_time).now(), id(fan_silent_mode),
+              (uint8_t)id(num_fan_start_temp).state,
+              (uint8_t)id(num_fan_max_temp).state,
+              (uint8_t)id(num_fan_speed).state
+            );
+        - while:
+            condition:
+              lambda: return id(fan_device).has_next();
+            then:
+              - ble_client.ble_write:
+                  id: chihiros_fan
+                  service_uuid: ${ble_service}
+                  characteristic_uuid: ${ble_tx}
+                  value: !lambda return id(fan_device).next();
+              - delay: 200ms
+        - delay: 2000ms
+        - switch.turn_off: fan_connection
+        - logger.log: "fan: done"
+    on_disconnect:
+      then:
+        - logger.log: "fan: disconnected"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPTIONAL: Doctor Mate (EC/TDS monitor + auto dosing)
+  # Set doctor_mac above to enable. Leave as 00:00:00:00:00:00 to skip.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - mac_address: ${doctor_mac}
+    id: chihiros_doctor
+    on_connect:
+      then:
+        - delay: 500ms
+        - lambda: |-
+            id(doctor_device).prepare(
+              id(ntp_time).now(),
+              id(num_doctor_tds).state,
+              id(num_doctor_volume).state
+            );
+        - while:
+            condition:
+              lambda: return id(doctor_device).has_next();
+            then:
+              - ble_client.ble_write:
+                  id: chihiros_doctor
+                  service_uuid: ${ble_service}
+                  characteristic_uuid: ${ble_tx}
+                  value: !lambda return id(doctor_device).next();
+              - delay: 200ms
+        - switch.turn_off: doctor_connection
+        - logger.log: "doctor: done"
+    on_disconnect:
+      then:
+        - logger.log: "doctor: disconnected"
+
+# ── Interval ──────────────────────────────────────────────────────────────────
+interval:
+  # Poll the fan every 5 minutes for temperature/humidity readings.
+  # The fan self-regulates; BLE is only needed for monitoring and config.
+  - interval: 5min
+    then:
+      - if:
+          condition:
+            lambda: return id(ha_connected) && ${fan_enabled} &&
+                    (strcmp("${fan_mac}", "00:00:00:00:00:00") != 0 || id(fan_auto_found));
+          then:
+            - switch.turn_on: fan_connection
+
+# ── Switches ──────────────────────────────────────────────────────────────────
+switch:
+  # Internal BLE connection switches
+  - platform: ble_client
+    ble_client_id: chihiros_co2
+    id: co2_connection
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: ble_client
+    ble_client_id: chihiros_stirrer
+    id: stirrer_connection
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: ble_client
+    ble_client_id: chihiros_light
+    id: light_connection
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: ble_client
+    ble_client_id: chihiros_dosing
+    id: dosing_connection
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: ble_client
+    ble_client_id: chihiros_fan
+    id: fan_connection
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: ble_client
+    ble_client_id: chihiros_doctor
+    id: doctor_connection
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # CO2 schedule
+  - platform: template
+    name: "CO2 schedule enabled"
+    id: sw_co2_schedule
+    icon: mdi:molecule-co2
+    restore_mode: RESTORE_DEFAULT_ON
+    lambda: return id(co2_schedule_enabled);
+    turn_on_action:
+      - globals.set:
+          id: co2_schedule_enabled
+          value: 'true'
+      - script.execute: co2_connect_if_ready
+    turn_off_action:
+      - globals.set:
+          id: co2_schedule_enabled
+          value: 'false'
+      - script.execute: co2_connect_if_ready
+
+  # Stirrer channel on/off
+  - platform: template
+    name: "Stirrer channel 0"
+    id: stirrer_sw_ch0
+    icon: mdi:rotate-3d-variant
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return id(stirrer_ch0_enabled);
+    turn_on_action:
+      - globals.set:
+          id: stirrer_ch0_enabled
+          value: 'true'
+    turn_off_action:
+      - globals.set:
+          id: stirrer_ch0_enabled
+          value: 'false'
+
+  - platform: template
+    name: "Stirrer channel 1"
+    id: stirrer_sw_ch1
+    icon: mdi:rotate-3d-variant
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return id(stirrer_ch1_enabled);
+    turn_on_action:
+      - globals.set:
+          id: stirrer_ch1_enabled
+          value: 'true'
+    turn_off_action:
+      - globals.set:
+          id: stirrer_ch1_enabled
+          value: 'false'
+
+  - platform: template
+    name: "Stirrer channel 2"
+    id: stirrer_sw_ch2
+    icon: mdi:rotate-3d-variant
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return id(stirrer_ch2_enabled);
+    turn_on_action:
+      - globals.set:
+          id: stirrer_ch2_enabled
+          value: 'true'
+    turn_off_action:
+      - globals.set:
+          id: stirrer_ch2_enabled
+          value: 'false'
+
+  - platform: template
+    name: "Stirrer channel 3"
+    id: stirrer_sw_ch3
+    icon: mdi:rotate-3d-variant
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return id(stirrer_ch3_enabled);
+    turn_on_action:
+      - globals.set:
+          id: stirrer_ch3_enabled
+          value: 'true'
+    turn_off_action:
+      - globals.set:
+          id: stirrer_ch3_enabled
+          value: 'false'
+
+  # Light auto/manual mode
+  - platform: template
+    name: "Light auto mode"
+    id: sw_light_auto
+    icon: mdi:clock-outline
+    restore_mode: ALWAYS_ON
+    lambda: return id(light_auto_mode);
+    turn_on_action:
+      - globals.set:
+          id: light_auto_mode
+          value: 'true'
+      - script.execute: light_connect_if_ready
+    turn_off_action:
+      - globals.set:
+          id: light_auto_mode
+          value: 'false'
+      - script.execute: light_connect_if_ready
+
+  # Dosing pump schedule enable (per pump)
+  - platform: template
+    name: "Dosing pump 1 schedule"
+    id: sw_dosing_schedule_p1
+    icon: mdi:calendar-clock
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    on_turn_on:
+      - script.execute: dosing_connect_if_ready
+    on_turn_off:
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 2 schedule"
+    id: sw_dosing_schedule_p2
+    icon: mdi:calendar-clock
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    on_turn_on:
+      - script.execute: dosing_connect_if_ready
+    on_turn_off:
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 3 schedule"
+    id: sw_dosing_schedule_p3
+    icon: mdi:calendar-clock
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    on_turn_on:
+      - script.execute: dosing_connect_if_ready
+    on_turn_off:
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 4 schedule"
+    id: sw_dosing_schedule_p4
+    icon: mdi:calendar-clock
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    on_turn_on:
+      - script.execute: dosing_connect_if_ready
+    on_turn_off:
+      - script.execute: dosing_connect_if_ready
+
+  # Fan silent mode (OPTIONAL)
+  - platform: template
+    name: "Fan silent mode"
+    id: sw_fan_silent
+    icon: mdi:volume-off
+    lambda: return id(fan_silent_mode);
+    turn_on_action:
+      - globals.set:
+          id: fan_silent_mode
+          value: 'true'
+      - script.execute: fan_connect_if_ready
+    turn_off_action:
+      - globals.set:
+          id: fan_silent_mode
+          value: 'false'
+      - script.execute: fan_connect_if_ready
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+button:
+  - platform: template
+    name: "CO2 apply schedule"
+    id: btn_co2_apply
+    icon: mdi:molecule-co2
+    on_press:
+      - script.execute: co2_connect_if_ready
+
+  - platform: template
+    name: "CO2 RTC sync"
+    id: btn_co2_rtc_sync
+    icon: mdi:clock-sync
+    on_press:
+      - lambda: id(co2_device).set_rtc_only();
+      - script.execute: co2_connect_if_ready
+
+  - platform: template
+    name: "Stirrer apply schedule"
+    id: btn_stirrer_apply
+    icon: mdi:content-save-cog
+    on_press:
+      - script.execute: stirrer_connect_if_ready
+
+  - platform: template
+    name: "Stirrer RTC sync"
+    id: btn_stirrer_rtc_sync
+    icon: mdi:clock-sync
+    on_press:
+      - lambda: id(stirrer_device).set_rtc_only();
+      - script.execute: stirrer_connect_if_ready
+
+  - platform: template
+    name: "Light apply schedule"
+    id: btn_light_apply
+    icon: mdi:clock-edit
+    on_press:
+      - script.execute: light_connect_if_ready
+
+  - platform: template
+    name: "Light RTC sync"
+    id: btn_light_rtc_sync
+    icon: mdi:clock-sync
+    on_press:
+      - lambda: id(light_device).set_rtc_only();
+      - script.execute: light_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 1"
+    id: btn_dosing_p1
+    icon: mdi:eyedropper
+    on_press:
+      - lambda: id(dosing_device).set_manual_dose(0, (uint8_t)(id(num_dosing_vol_p1).state * 10.0f + 0.5f));
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 2"
+    id: btn_dosing_p2
+    icon: mdi:eyedropper
+    on_press:
+      - lambda: id(dosing_device).set_manual_dose(1, (uint8_t)(id(num_dosing_vol_p2).state * 10.0f + 0.5f));
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 3"
+    id: btn_dosing_p3
+    icon: mdi:eyedropper
+    on_press:
+      - lambda: id(dosing_device).set_manual_dose(2, (uint8_t)(id(num_dosing_vol_p3).state * 10.0f + 0.5f));
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Dosing pump 4"
+    id: btn_dosing_p4
+    icon: mdi:eyedropper
+    on_press:
+      - lambda: id(dosing_device).set_manual_dose(3, (uint8_t)(id(num_dosing_vol_p4).state * 10.0f + 0.5f));
+      - script.execute: dosing_connect_if_ready
+
+  - platform: template
+    name: "Fan RTC sync"
+    id: btn_fan_rtc_sync
+    icon: mdi:clock-sync
+    on_press:
+      - script.execute: fan_connect_if_ready
+
+  - platform: template
+    name: "Doctor Mate RTC sync"
+    id: btn_doctor_rtc_sync
+    icon: mdi:clock-sync
+    on_press:
+      - lambda: id(doctor_device).set_rtc_only();
+      - script.execute: doctor_connect_if_ready
+
+# ── Numbers ───────────────────────────────────────────────────────────────────
+number:
+  # CO2
+  - platform: template
+    id: co2_pre_start_minutes
+    name: "CO2 pre-start (min)"
+    min_value: 0
+    max_value: 180
+    step: 5
+    initial_value: 90
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "min"
+    icon: mdi:clock-minus
+    on_value:
+      - script.execute: schedule_debounce_co2
+
+  # Stirrer channel 0
+  - platform: template
+    id: stirrer_ch0_speed
+    name: "Stirrer channel 0 speed"
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    icon: mdi:speedometer
+
+  - platform: template
+    id: stirrer_ch0_lead_time
+    name: "Stirrer channel 0 lead time"
+    min_value: 0
+    max_value: 240
+    step: 1
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer-outline
+
+  - platform: template
+    id: stirrer_ch0_start_hour
+    name: "Stirrer channel 0 start hour"
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "h"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch0_start_min
+    name: "Stirrer channel 0 start minute"
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "min"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch0_duration
+    name: "Stirrer channel 0 duration"
+    min_value: 1
+    max_value: 240
+    step: 1
+    initial_value: 13
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer
+
+  # Stirrer channel 1
+  - platform: template
+    id: stirrer_ch1_speed
+    name: "Stirrer channel 1 speed"
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    icon: mdi:speedometer
+
+  - platform: template
+    id: stirrer_ch1_lead_time
+    name: "Stirrer channel 1 lead time"
+    min_value: 0
+    max_value: 240
+    step: 1
+    initial_value: 50
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer-outline
+
+  - platform: template
+    id: stirrer_ch1_start_hour
+    name: "Stirrer channel 1 start hour"
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "h"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch1_start_min
+    name: "Stirrer channel 1 start minute"
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "min"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch1_duration
+    name: "Stirrer channel 1 duration"
+    min_value: 1
+    max_value: 240
+    step: 1
+    initial_value: 13
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer
+
+  # Stirrer channel 2
+  - platform: template
+    id: stirrer_ch2_speed
+    name: "Stirrer channel 2 speed"
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    icon: mdi:speedometer
+
+  - platform: template
+    id: stirrer_ch2_lead_time
+    name: "Stirrer channel 2 lead time"
+    min_value: 0
+    max_value: 240
+    step: 1
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer-outline
+
+  - platform: template
+    id: stirrer_ch2_start_hour
+    name: "Stirrer channel 2 start hour"
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "h"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch2_start_min
+    name: "Stirrer channel 2 start minute"
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "min"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch2_duration
+    name: "Stirrer channel 2 duration"
+    min_value: 1
+    max_value: 240
+    step: 1
+    initial_value: 13
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer
+
+  # Stirrer channel 3
+  - platform: template
+    id: stirrer_ch3_speed
+    name: "Stirrer channel 3 speed"
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    icon: mdi:speedometer
+
+  - platform: template
+    id: stirrer_ch3_lead_time
+    name: "Stirrer channel 3 lead time"
+    min_value: 0
+    max_value: 240
+    step: 1
+    initial_value: 35
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer-outline
+
+  - platform: template
+    id: stirrer_ch3_start_hour
+    name: "Stirrer channel 3 start hour"
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "h"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch3_start_min
+    name: "Stirrer channel 3 start minute"
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "min"
+    icon: mdi:clock-start
+
+  - platform: template
+    id: stirrer_ch3_duration
+    name: "Stirrer channel 3 duration"
+    min_value: 1
+    max_value: 240
+    step: 1
+    initial_value: 13
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "s"
+    icon: mdi:timer
+
+  # Light — manual brightness
+  - platform: template
+    name: "Light red (manual)"
+    id: num_light_r
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    restore_value: true
+    icon: mdi:led-on
+    unit_of_measurement: "%"
+    optimistic: true
+    on_value:
+      - script.execute: light_debounce_manual
+
+  - platform: template
+    name: "Light green (manual)"
+    id: num_light_g
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    restore_value: true
+    icon: mdi:led-on
+    unit_of_measurement: "%"
+    optimistic: true
+    on_value:
+      - script.execute: light_debounce_manual
+
+  - platform: template
+    name: "Light blue (manual)"
+    id: num_light_b
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 0
+    restore_value: true
+    icon: mdi:led-on
+    unit_of_measurement: "%"
+    optimistic: true
+    on_value:
+      - script.execute: light_debounce_manual
+
+  # Light — schedule
+  # Note: ramp value 90 min is forbidden (0x5a = BLE frame header byte).
+  # Values near 90 are auto-adjusted to 89 by the component.
+  - platform: template
+    name: "Light schedule ramp"
+    id: light_ramp
+    min_value: 0
+    max_value: 150
+    step: 5
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "min"
+    icon: mdi:sun-angle
+
+  - platform: template
+    name: "Light schedule red"
+    id: light_schedule_r
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 61
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "%"
+    icon: mdi:led-on
+
+  - platform: template
+    name: "Light schedule green"
+    id: light_schedule_g
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 45
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "%"
+    icon: mdi:led-on
+
+  - platform: template
+    name: "Light schedule blue"
+    id: light_schedule_b
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 80
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "%"
+    icon: mdi:led-on
+
+  # Dosing — volume per pump
+  - platform: template
+    name: "Dosing pump 1 volume"
+    id: num_dosing_vol_p1
+    min_value: 0.5
+    max_value: 25.5
+    step: 0.5
+    initial_value: 1.0
+    restore_value: true
+    unit_of_measurement: "mL"
+    optimistic: true
+    icon: mdi:water
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 2 volume"
+    id: num_dosing_vol_p2
+    min_value: 0.5
+    max_value: 25.5
+    step: 0.5
+    initial_value: 10.0
+    restore_value: true
+    unit_of_measurement: "mL"
+    optimistic: true
+    icon: mdi:water
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 3 volume"
+    id: num_dosing_vol_p3
+    min_value: 0.5
+    max_value: 25.5
+    step: 0.5
+    initial_value: 1.0
+    restore_value: true
+    unit_of_measurement: "mL"
+    optimistic: true
+    icon: mdi:water
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 4 volume"
+    id: num_dosing_vol_p4
+    min_value: 0.5
+    max_value: 25.5
+    step: 0.5
+    initial_value: 1.0
+    restore_value: true
+    unit_of_measurement: "mL"
+    optimistic: true
+    icon: mdi:water
+    on_value:
+      - script.execute: dosing_debounce
+
+  # Dosing — schedule time per pump
+  - platform: template
+    name: "Dosing pump 1 hour"
+    id: num_dosing_hour_p1
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 9
+    restore_value: true
+    unit_of_measurement: "h"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 2 hour"
+    id: num_dosing_hour_p2
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 17
+    restore_value: true
+    unit_of_measurement: "h"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 3 hour"
+    id: num_dosing_hour_p3
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 9
+    restore_value: true
+    unit_of_measurement: "h"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 4 hour"
+    id: num_dosing_hour_p4
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 9
+    restore_value: true
+    unit_of_measurement: "h"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 1 minute"
+    id: num_dosing_min_p1
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    unit_of_measurement: "min"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 2 minute"
+    id: num_dosing_min_p2
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    unit_of_measurement: "min"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 3 minute"
+    id: num_dosing_min_p3
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    unit_of_measurement: "min"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 4 minute"
+    id: num_dosing_min_p4
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    unit_of_measurement: "min"
+    optimistic: true
+    icon: mdi:clock-outline
+    on_value:
+      - script.execute: dosing_debounce
+
+  # Dosing — weekday bitmask per pump (Mon=64 Tue=32 Wed=16 Thu=8 Fri=4 Sat=2 Sun=1, 127=daily)
+  - platform: template
+    name: "Dosing pump 1 weekdays"
+    id: num_dosing_weekdays_p1
+    min_value: 0
+    max_value: 127
+    step: 1
+    initial_value: 127
+    restore_value: true
+    optimistic: true
+    icon: mdi:calendar-week
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 2 weekdays"
+    id: num_dosing_weekdays_p2
+    min_value: 0
+    max_value: 127
+    step: 1
+    initial_value: 88
+    restore_value: true
+    optimistic: true
+    icon: mdi:calendar-week
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 3 weekdays"
+    id: num_dosing_weekdays_p3
+    min_value: 0
+    max_value: 127
+    step: 1
+    initial_value: 127
+    restore_value: true
+    optimistic: true
+    icon: mdi:calendar-week
+    on_value:
+      - script.execute: dosing_debounce
+
+  - platform: template
+    name: "Dosing pump 4 weekdays"
+    id: num_dosing_weekdays_p4
+    min_value: 0
+    max_value: 127
+    step: 1
+    initial_value: 127
+    restore_value: true
+    optimistic: true
+    icon: mdi:calendar-week
+    on_value:
+      - script.execute: dosing_debounce
+
+  # Fan (OPTIONAL)
+  - platform: template
+    name: "Fan start temperature"
+    id: num_fan_start_temp
+    min_value: 18
+    max_value: 32
+    step: 1
+    initial_value: 24
+    restore_value: true
+    icon: mdi:thermometer-water
+    unit_of_measurement: "°C"
+    optimistic: true
+    on_value:
+      - script.execute: fan_debounce
+
+  - platform: template
+    name: "Fan max cooling temperature"
+    id: num_fan_max_temp
+    min_value: 20
+    max_value: 35
+    step: 1
+    initial_value: 28
+    restore_value: true
+    icon: mdi:thermometer-high
+    unit_of_measurement: "°C"
+    optimistic: true
+    on_value:
+      - script.execute: fan_debounce
+
+  - platform: template
+    name: "Fan manual speed"
+    id: num_fan_speed
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 0
+    restore_value: false
+    icon: mdi:fan
+    unit_of_measurement: ""
+    optimistic: true
+    on_value:
+      - script.execute: fan_debounce
+
+  # Doctor Mate (OPTIONAL)
+  - platform: template
+    name: "Doctor Mate TDS"
+    id: num_doctor_tds
+    min_value: 10
+    max_value: 200
+    step: 1
+    initial_value: 130
+    restore_value: false
+    icon: mdi:water-check
+    unit_of_measurement: "ppm"
+    optimistic: true
+    on_value:
+      - script.execute: doctor_debounce
+
+  - platform: template
+    name: "Doctor Mate tank volume"
+    id: num_doctor_volume
+    min_value: 10
+    max_value: 127
+    step: 1
+    initial_value: 125
+    restore_value: true
+    icon: mdi:water
+    unit_of_measurement: "L"
+    optimistic: true
+    on_value:
+      - script.execute: doctor_debounce
+
+# ── Select ────────────────────────────────────────────────────────────────────
+select:
+  # Doctor Mate preset profiles (OPTIONAL)
+  - platform: template
+    name: "Doctor Mate profile"
+    id: sel_doctor_profile
+    icon: mdi:fish
+    restore_value: true
+    optimistic: true
+    options:
+      - "Plant (80 ppm)"
+      - "Fish (93 ppm)"
+      - "Shrimp (66 ppm)"
+      - "Manual"
+    initial_option: "Manual"
+    on_value:
+      # Selecting a profile sets the TDS number, which triggers the BLE update
+      - if:
+          condition:
+            lambda: return x == "Plant (80 ppm)";
+          then:
+            - number.set:
+                id: num_doctor_tds
+                value: 80
+      - if:
+          condition:
+            lambda: return x == "Fish (93 ppm)";
+          then:
+            - number.set:
+                id: num_doctor_tds
+                value: 93
+      - if:
+          condition:
+            lambda: return x == "Shrimp (66 ppm)";
+          then:
+            - number.set:
+                id: num_doctor_tds
+                value: 66
+
+# ── Sensors ───────────────────────────────────────────────────────────────────
+sensor:
+  # CO2 notification (raw, logged for debugging)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: chihiros_co2
+    service_uuid: ${ble_service}
+    characteristic_uuid: ${ble_rx}
+    id: co2_notification
+    name: "CO2 notification"
+    notify: true
+    internal: true
+    unit_of_measurement: ""
+    lambda: |-
+      ESP_LOGI("co2", "Notification: %s", chihiros::hex_dump(x).c_str());
+      if (x.size() >= 7) return (float)x[6];
+      return NAN;
+
+  # Light notification (raw, logged for debugging)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: chihiros_light
+    service_uuid: ${ble_service}
+    characteristic_uuid: ${ble_rx}
+    id: light_notification
+    name: "Light notification"
+    notify: true
+    internal: true
+    unit_of_measurement: ""
+    lambda: |-
+      ESP_LOGI("light", "Notification (%d bytes): %s", (int)x.size(), chihiros::hex_dump(x).c_str());
+      return NAN;
+
+  # Dosing notification (raw, logged for debugging)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: chihiros_dosing
+    service_uuid: ${ble_service}
+    characteristic_uuid: ${ble_rx}
+    id: dosing_notification
+    name: "Dosing notification"
+    notify: true
+    internal: true
+    unit_of_measurement: ""
+    lambda: |-
+      ESP_LOGI("dosing", "Notification (%d bytes): %s", (int)x.size(), chihiros::hex_dump(x).c_str());
+      return NAN;
+
+  # Fan — live readings (OPTIONAL)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: chihiros_fan
+    service_uuid: ${ble_service}
+    characteristic_uuid: ${ble_rx}
+    id: fan_notification
+    name: "Fan notification"
+    notify: true
+    internal: true
+    unit_of_measurement: ""
+    lambda: |-
+      auto d = chihiros::parse_ventilator_notificatie(x);
+      if (d.valid) {
+        id(sensor_fan_speed).publish_state(d.fan_speed);
+        if (d.kamer_temp > 0.0f && d.kamer_temp < 50.0f) id(sensor_room_temp).publish_state(d.kamer_temp);
+        if (d.water_temp > 0.0f && d.water_temp < 50.0f) id(sensor_water_temp).publish_state(d.water_temp);
+        id(sensor_humidity).publish_state(d.humidity);
+      }
+      return NAN;
+
+  - platform: template
+    id: sensor_water_temp
+    name: "Aquarium water temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:thermometer-water
+
+  - platform: template
+    id: sensor_room_temp
+    name: "Aquarium room temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:thermometer
+
+  - platform: template
+    id: sensor_humidity
+    name: "Aquarium humidity"
+    unit_of_measurement: "%"
+    device_class: humidity
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: template
+    id: sensor_fan_speed
+    name: "Fan speed"
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:fan
+
+  # Doctor Mate — EC reading (OPTIONAL)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: chihiros_doctor
+    service_uuid: ${ble_service}
+    characteristic_uuid: ${ble_rx}
+    id: doctor_notification
+    name: "Doctor Mate notification"
+    notify: true
+    internal: true
+    unit_of_measurement: ""
+    lambda: |-
+      ESP_LOGI("doctor", "Notification (%d bytes): %s", (int)x.size(), chihiros::hex_dump(x).c_str());
+      if (x.size() >= 6 && x[5] > 0 && x[5] != 0xff) {
+        id(sensor_doctor_ec).publish_state((float)x[5]);
+      }
+      return NAN;
+
+  - platform: template
+    id: sensor_doctor_ec
+    name: "Doctor Mate EC"
+    unit_of_measurement: "µS/cm"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:water-percent
