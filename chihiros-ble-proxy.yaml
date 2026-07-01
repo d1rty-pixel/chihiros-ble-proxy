@@ -496,6 +496,7 @@ ble_client:
             condition:
               lambda: return id(co2_device).has_next();
             then:
+              - lambda: ESP_LOGI("co2", "TX: %s", chihiros::describe_packet(id(co2_device).peek()).c_str());
               - ble_client.ble_write:
                   id: chihiros_co2
                   service_uuid: ${ble_service}
@@ -541,6 +542,7 @@ ble_client:
             condition:
               lambda: return id(stirrer_device).has_next();
             then:
+              - lambda: ESP_LOGI("stirrer", "TX: %s", chihiros::describe_packet(id(stirrer_device).peek()).c_str());
               - ble_client.ble_write:
                   id: chihiros_stirrer
                   service_uuid: ${ble_service}
@@ -580,6 +582,7 @@ ble_client:
             condition:
               lambda: return id(light_device).has_next();
             then:
+              - lambda: ESP_LOGI("light", "TX: %s", chihiros::describe_packet(id(light_device).peek()).c_str());
               - ble_client.ble_write:
                   id: chihiros_light
                   service_uuid: ${ble_service}
@@ -623,6 +626,7 @@ ble_client:
             condition:
               lambda: return id(dosing_device).has_next();
             then:
+              - lambda: ESP_LOGI("dosing", "TX: %s", chihiros::describe_packet(id(dosing_device).peek()).c_str());
               - ble_client.ble_write:
                   id: chihiros_dosing
                   service_uuid: ${ble_service}
@@ -662,6 +666,7 @@ ble_client:
             condition:
               lambda: return id(fan_device).has_next();
             then:
+              - lambda: ESP_LOGI("fan", "TX: %s", chihiros::describe_packet(id(fan_device).peek()).c_str());
               - ble_client.ble_write:
                   id: chihiros_fan
                   service_uuid: ${ble_service}
@@ -701,6 +706,7 @@ ble_client:
             condition:
               lambda: return id(doctor_device).has_next();
             then:
+              - lambda: ESP_LOGI("doctor", "TX: %s", chihiros::describe_packet(id(doctor_device).peek()).c_str());
               - ble_client.ble_write:
                   id: chihiros_doctor
                   service_uuid: ${ble_service}

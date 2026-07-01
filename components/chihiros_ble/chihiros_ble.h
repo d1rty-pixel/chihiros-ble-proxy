@@ -252,6 +252,149 @@ inline std::string hex_dump(const std::vector<uint8_t>& data) {
     return s;
 }
 
+// Returns a human-readable description of an outgoing BLE command packet.
+// Frame layout: [hdr] 01 [len] 00 [seq] [cmd] [data...] [XOR-CRC]
+inline std::string describe_packet(const std::vector<uint8_t>& p) {
+    if (p.size() < 7) return "malformed packet";
+    uint8_t hdr      = p[0];
+    uint8_t cmd_byte = p[5];
+    int     data_len = (int)p.size() - 7;
+    auto    d        = [&](int i) -> uint8_t { return (i < data_len) ? p[6 + i] : 0; };
+    char buf[160];
+
+    // AUTH (cmd 0x04)
+    if (cmd_byte == 0x04) {
+        uint8_t b = d(0);
+        if (b == 0x01) return (hdr == 0x5a) ? "auth (base)" : "auth (device)";
+        if (b == 0x06) return "auth ext1 (fan)";
+        if (b == 0x08) return "auth ext2 (fan)";
+        if (b == 0x04) return "auth (dosing step 1)";
+        if (b == 0x05) return "auth (dosing step 2)";
+        snprintf(buf, sizeof(buf), "auth (0x%02x)", b);
+        return buf;
+    }
+
+    // RTC sync (cmd 0x09)
+    if (cmd_byte == 0x09 && data_len >= 6) {
+        snprintf(buf, sizeof(buf), "RTC sync: 20%02d-%02d %02d:%02d:%02d",
+                 d(0), d(1), d(3), d(4), d(5));
+        return buf;
+    }
+
+    // MODE (cmd 0x05) — CO2 schedule control, fan silent mode
+    if (cmd_byte == 0x05) {
+        uint8_t b = d(0);
+        if (b == 0x07) return "CO2: evaluate schedule now";
+        if (b == 0x12) return "CO2: switch to auto mode";
+        if (b == 0x22) return "fan mode: silent ON";
+        if (b == 0x23) return "fan mode: silent OFF";
+        snprintf(buf, sizeof(buf), "mode (0x%02x)", b);
+        return buf;
+    }
+
+    // CO2 schedule time slot (cmd 0x16, header BASE)
+    if (cmd_byte == 0x16 && hdr == 0x5a && data_len >= 3) {
+        const char* state = (d(2) == 0x64) ? "ON" : (d(2) == 0x00) ? "OFF" : "empty";
+        snprintf(buf, sizeof(buf), "CO2 schedule slot: %02d:%02d -> %s", d(0), d(1), state);
+        return buf;
+    }
+
+    // BRIGHTNESS / FAN_SPEED (cmd 0x07, header BASE)
+    if (cmd_byte == 0x07 && hdr == 0x5a && data_len >= 2) {
+        if (d(0) == 0xff) {
+            snprintf(buf, sizeof(buf), "fan speed: %d", d(1));
+        } else {
+            snprintf(buf, sizeof(buf), "WRGB2 manual brightness: ch%d = %d%%", d(0), d(1));
+        }
+        return buf;
+    }
+
+    // WRGB2 auto schedule (cmd 0x19, header DEVICE)
+    if (cmd_byte == 0x19 && hdr == 0xa5 && data_len >= 9) {
+        snprintf(buf, sizeof(buf),
+                 "WRGB2 schedule: on %02d:%02d off %02d:%02d ramp=%dmin days=0x%02x RGB(%d,%d,%d)",
+                 d(0), d(1), d(2), d(3), d(4), d(5), d(6), d(7), d(8));
+        return buf;
+    }
+
+    // Fan temperature threshold (cmd 0x21, header DEVICE)
+    if (cmd_byte == 0x21 && hdr == 0xa5 && data_len >= 2) {
+        snprintf(buf, sizeof(buf), "fan temp threshold: start=%d degC max=%d degC", d(0), d(1));
+        return buf;
+    }
+
+    // Doctor Mate settings (cmd 0x01, header DEVICE)
+    if (cmd_byte == 0x01 && hdr == 0xa5 && data_len >= 2) {
+        snprintf(buf, sizeof(buf), "Doctor Mate settings: value=%d", d(1));
+        return buf;
+    }
+
+    // Stirrer toggle / restore (cmd 0x14, header DEVICE)
+    if (cmd_byte == 0x14 && hdr == 0xa5 && data_len >= 10) {
+        int non_skip = 0;
+        for (int i = 2; i <= 5; i++) if (d(i) != 0xff) non_skip++;
+        if (non_skip == 1) {
+            for (int i = 2; i <= 5; i++) {
+                if (d(i) != 0xff) {
+                    snprintf(buf, sizeof(buf), "stirrer ch%d toggle %s", i - 2, d(i) ? "ON" : "OFF");
+                    return buf;
+                }
+            }
+        }
+        snprintf(buf, sizeof(buf), "stirrer restore: ch0=%d ch1=%d ch2=%d ch3=%d",
+                 d(2), d(3), d(4), d(5));
+        return buf;
+    }
+
+    // Stirrer timer / dosing schedule timer (cmd 0x15, header DEVICE)
+    if (cmd_byte == 0x15 && hdr == 0xa5 && data_len >= 6) {
+        if (d(1) == 0x03) {
+            snprintf(buf, sizeof(buf), "stirrer ch%d timer: %02d:%02d for %ds", d(0), d(2), d(3), d(5));
+        } else {
+            snprintf(buf, sizeof(buf), "dosing pump %d schedule timer: hour ~%d", d(0), d(2) * 2);
+        }
+        return buf;
+    }
+
+    // Stirrer weekdays / dose pump / dosing schedule speed (cmd 0x1b, header DEVICE)
+    if (cmd_byte == 0x1b && hdr == 0xa5) {
+        if (data_len == 5) {
+            snprintf(buf, sizeof(buf), "dose pump %d: %.1f mL", d(0), d(4) / 10.0f);
+            return buf;
+        }
+        if (data_len >= 6) {
+            if (d(5) != 0x00) {
+                snprintf(buf, sizeof(buf),
+                         "dosing pump %d schedule: weekdays=0x%02x minute=%d vol=%.1f mL",
+                         d(0), d(1), d(3), d(5) / 10.0f);
+            } else {
+                snprintf(buf, sizeof(buf), "stirrer ch%d weekdays: 0x%02x", d(0), d(1));
+            }
+            return buf;
+        }
+    }
+
+    // Stirrer / dosing schedule enable (cmd 0x20, header DEVICE)
+    if (cmd_byte == 0x20 && hdr == 0xa5 && data_len >= 3) {
+        snprintf(buf, sizeof(buf), "ch/pump %d: %s", d(0), d(2) ? "enable" : "disable");
+        return buf;
+    }
+
+    // Stirrer apply (cmd 0x1f, header DEVICE)
+    if (cmd_byte == 0x1f && hdr == 0xa5) {
+        return "stirrer apply settings";
+    }
+
+    // Stirrer lead time + speed (cmd 0x2a, header DEVICE)
+    if (cmd_byte == 0x2a && hdr == 0xa5 && data_len >= 4) {
+        snprintf(buf, sizeof(buf), "stirrer ch%d: lead=%ds speed=%d", d(0), d(2), d(3));
+        return buf;
+    }
+
+    snprintf(buf, sizeof(buf), "hdr=0x%02x cmd=0x%02x [%s]", hdr, cmd_byte, hex_dump(p).c_str());
+    return buf;
+}
+
 // Calculates CO2 start time: fotoperiode_start minus prestart minutes, midnight-safe.
 // Returns minutes since midnight (0–1439).
 inline int co2_start_minuten(int fotoperiode_uur, int fotoperiode_min, int prestart_min) {

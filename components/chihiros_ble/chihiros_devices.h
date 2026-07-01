@@ -49,6 +49,7 @@ protected:
 
 public:
     bool has_next() const { return !queue_.empty(); }
+    const std::vector<uint8_t>& peek() const { return queue_.front(); }
     std::vector<uint8_t> next() {
         auto cmd = queue_.front(); queue_.pop_front(); return cmd;
     }
