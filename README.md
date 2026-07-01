@@ -91,11 +91,11 @@ Alternatively, flash the firmware first and check the ESP32 logs — any Chihiro
 After adding the device in Home Assistant (Settings → Devices & Services → ESPHome), you get:
 
 **Light (WRGB II)**
-- Switch: `Light auto mode` — auto schedule vs. manual control
-- Numbers: `Light schedule red/green/blue` (%), `Light schedule ramp` (min)
-- Numbers: `Light red/green/blue (manual)` (%) — only used when auto mode is off
-- Buttons: `Light apply schedule`, `Light RTC sync`
-- Datetime: `Light period start / end`
+- Switch: `WRGB2 auto mode` — auto schedule vs. manual control
+- Lights: `WRGB2 Red channel`, `WRGB2 Green channel`, `WRGB2 Blue channel` — independent brightness dimmers, active when auto mode is off
+- Numbers: `WRGB2 schedule red/green/blue` (%), `WRGB2 schedule ramp` (min) — used when auto mode is on
+- Buttons: `WRGB2 apply schedule`, `WRGB2 RTC sync`
+- Datetime: `Light period start / end` (shared with CO2 schedule)
 
 **CO2 controller**
 - Switch: `CO2 schedule enabled`
@@ -115,12 +115,20 @@ After adding the device in Home Assistant (Settings → Devices & Services → E
 **Cooling fan**
 - Switch: `Fan silent mode`
 - Numbers: `Fan start temperature`, `Fan max cooling temperature`, `Fan manual speed`
-- Sensors: `Aquarium water temperature`, `Aquarium room temperature`, `Humidity`, `Fan speed`
+- Sensors: `Fan water temperature`, `Fan air temperature`, `Fan humidity`, `Fan speed`
 
 **Doctor Mate (EC/TDS)**
 - Select: `Doctor Mate profile` (Plant / Fish / Shrimp / Manual)
 - Numbers: `Doctor Mate TDS`, `Doctor Mate tank volume`
 - Sensor: `Doctor Mate EC`
+
+### Renaming entities
+
+Entity names are fixed in the firmware but can be customised in Home Assistant without reflashing: go to **Settings → Devices & Services → Entities**, find the entity and click the pencil icon to rename it. The new name persists across firmware updates.
+
+### Multiple devices of the same type
+
+Each ESP32 supports one device of each type. If you have two WRGB2 lights or two stirrers, flash a **second ESP32** with a copy of the YAML and configure different MAC addresses (or different `name`/`friendly_name` substitutions so the two proxies appear as separate devices in HA).
 
 ## BLE protocol
 

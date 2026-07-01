@@ -179,7 +179,6 @@ esp32_ble_tracker:
                 ESP_LOGI("ble_scan", "Auto-discovered Doctor Mate: %s", mac.c_str());
                 return;
             }
-            // Skip devices that are already configured by MAC
             // Suppress known device types: either a static MAC is configured, or the device
             // was already auto-discovered. MAC address comparison is intentionally skipped
             // because Chihiros devices use rotating random BLE addresses.
@@ -910,7 +909,7 @@ switch:
 
   # Light auto/manual mode
   - platform: template
-    name: "Light auto mode"
+    name: "WRGB2 auto mode"
     id: sw_light_auto
     icon: mdi:clock-outline
     restore_mode: ALWAYS_ON
@@ -1021,14 +1020,14 @@ button:
       - script.execute: stirrer_connect_if_ready
 
   - platform: template
-    name: "Light apply schedule"
+    name: "WRGB2 apply schedule"
     id: btn_light_apply
     icon: mdi:clock-edit
     on_press:
       - script.execute: light_connect_if_ready
 
   - platform: template
-    name: "Light RTC sync"
+    name: "WRGB2 RTC sync"
     id: btn_light_rtc_sync
     icon: mdi:clock-sync
     on_press:
@@ -1343,7 +1342,7 @@ number:
   # Note: ramp value 90 min is forbidden (0x5a = BLE frame header byte).
   # Values near 90 are auto-adjusted to 89 by the component.
   - platform: template
-    name: "Light schedule ramp"
+    name: "WRGB2 schedule ramp"
     id: light_ramp
     min_value: 0
     max_value: 150
@@ -1355,7 +1354,7 @@ number:
     icon: mdi:sun-angle
 
   - platform: template
-    name: "Light schedule red"
+    name: "WRGB2 schedule red"
     id: light_schedule_r
     min_value: 0
     max_value: 100
@@ -1367,7 +1366,7 @@ number:
     icon: mdi:led-on
 
   - platform: template
-    name: "Light schedule green"
+    name: "WRGB2 schedule green"
     id: light_schedule_g
     min_value: 0
     max_value: 100
@@ -1379,7 +1378,7 @@ number:
     icon: mdi:led-on
 
   - platform: template
-    name: "Light schedule blue"
+    name: "WRGB2 schedule blue"
     id: light_schedule_b
     min_value: 0
     max_value: 100
@@ -1795,7 +1794,7 @@ sensor:
 
   - platform: template
     id: sensor_water_temp
-    name: "Aquarium water temperature"
+    name: "Fan water temperature"
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
@@ -1804,7 +1803,7 @@ sensor:
 
   - platform: template
     id: sensor_room_temp
-    name: "Aquarium room temperature"
+    name: "Fan air temperature"
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
@@ -1813,7 +1812,7 @@ sensor:
 
   - platform: template
     id: sensor_humidity
-    name: "Aquarium humidity"
+    name: "Fan humidity"
     unit_of_measurement: "%"
     device_class: humidity
     state_class: measurement
