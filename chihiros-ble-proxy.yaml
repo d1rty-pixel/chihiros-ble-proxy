@@ -127,7 +127,7 @@ esp32_ble_tracker:
             std::string name = x.get_name();
             std::string mac = x.address_str();
             if (name.rfind("DY", 0) != 0) return;
-            uint64_t addr = x.address();
+            uint64_t addr = x.address_uint64();
             // Auto-discovery: if a module is enabled but has no MAC configured,
             // adopt the first matching advertisement and connect immediately.
             if (${co2_enabled} && strcmp("${co2_mac}", "00:00:00:00:00:00") == 0 &&
