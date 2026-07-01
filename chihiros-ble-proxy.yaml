@@ -506,10 +506,10 @@ light:
     name: "WRGB2 Red channel"
     output: light_ch_r_output
     restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
+    on_turn_on:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
-    turn_off_action:
+    on_turn_off:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
 
@@ -518,10 +518,10 @@ light:
     name: "WRGB2 Green channel"
     output: light_ch_g_output
     restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
+    on_turn_on:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
-    turn_off_action:
+    on_turn_off:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
 
@@ -530,10 +530,10 @@ light:
     name: "WRGB2 Blue channel"
     output: light_ch_b_output
     restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
+    on_turn_on:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
-    turn_off_action:
+    on_turn_off:
       - lambda: id(light_auto_mode) = false;
       - script.execute: light_debounce_manual
 
