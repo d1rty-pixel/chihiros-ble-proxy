@@ -475,6 +475,47 @@ datetime:
     on_value:
       - script.execute: schedule_debounce_both
 
+# ── WRGB2 channel lights ──────────────────────────────────────────────────────
+# Each channel (R, G, B) is an independent brightness-only dimmer.
+# Turning a channel on/off or adjusting brightness switches to manual mode and
+# triggers a BLE write with all three channel levels sent together.
+light:
+  - platform: template
+    id: light_ch_r
+    name: "WRGB2 Red channel"
+    restore_mode: RESTORE_DEFAULT_OFF
+    color_mode: BRIGHTNESS
+    turn_on_action:
+      - lambda: id(light_auto_mode) = false;
+      - script.execute: light_debounce_manual
+    turn_off_action:
+      - lambda: id(light_auto_mode) = false;
+      - script.execute: light_debounce_manual
+
+  - platform: template
+    id: light_ch_g
+    name: "WRGB2 Green channel"
+    restore_mode: RESTORE_DEFAULT_OFF
+    color_mode: BRIGHTNESS
+    turn_on_action:
+      - lambda: id(light_auto_mode) = false;
+      - script.execute: light_debounce_manual
+    turn_off_action:
+      - lambda: id(light_auto_mode) = false;
+      - script.execute: light_debounce_manual
+
+  - platform: template
+    id: light_ch_b
+    name: "WRGB2 Blue channel"
+    restore_mode: RESTORE_DEFAULT_OFF
+    color_mode: BRIGHTNESS
+    turn_on_action:
+      - lambda: id(light_auto_mode) = false;
+      - script.execute: light_debounce_manual
+    turn_off_action:
+      - lambda: id(light_auto_mode) = false;
+      - script.execute: light_debounce_manual
+
 # ── BLE clients ───────────────────────────────────────────────────────────────
 
 ble_client:
@@ -569,14 +610,25 @@ ble_client:
         - delay: 500ms
         - lambda: |-
             id(light_connect_fails) = 0;
+            uint8_t r, g, b;
+            if (id(light_auto_mode)) {
+                r = (uint8_t)id(light_schedule_r).state;
+                g = (uint8_t)id(light_schedule_g).state;
+                b = (uint8_t)id(light_schedule_b).state;
+            } else {
+                auto cv_r = id(light_ch_r)->current_values;
+                r = (uint8_t)(cv_r.get_brightness() * cv_r.get_state() * 100.0f + 0.5f);
+                auto cv_g = id(light_ch_g)->current_values;
+                g = (uint8_t)(cv_g.get_brightness() * cv_g.get_state() * 100.0f + 0.5f);
+                auto cv_b = id(light_ch_b)->current_values;
+                b = (uint8_t)(cv_b.get_brightness() * cv_b.get_state() * 100.0f + 0.5f);
+            }
             id(light_device).prepare(
               id(ntp_time).now(), id(light_auto_mode),
               id(light_period_start).hour, id(light_period_start).minute,
               id(light_period_end).hour,   id(light_period_end).minute,
               (uint8_t)id(light_ramp).state,
-              (uint8_t)id(light_schedule_r).state,
-              (uint8_t)id(light_schedule_g).state,
-              (uint8_t)id(light_schedule_b).state
+              r, g, b
             );
         - while:
             condition:
@@ -1286,49 +1338,6 @@ number:
     optimistic: true
     unit_of_measurement: "s"
     icon: mdi:timer
-
-  # Light — manual brightness
-  - platform: template
-    name: "Light red (manual)"
-    id: num_light_r
-    min_value: 0
-    max_value: 100
-    step: 1
-    initial_value: 0
-    restore_value: true
-    icon: mdi:led-on
-    unit_of_measurement: "%"
-    optimistic: true
-    on_value:
-      - script.execute: light_debounce_manual
-
-  - platform: template
-    name: "Light green (manual)"
-    id: num_light_g
-    min_value: 0
-    max_value: 100
-    step: 1
-    initial_value: 0
-    restore_value: true
-    icon: mdi:led-on
-    unit_of_measurement: "%"
-    optimistic: true
-    on_value:
-      - script.execute: light_debounce_manual
-
-  - platform: template
-    name: "Light blue (manual)"
-    id: num_light_b
-    min_value: 0
-    max_value: 100
-    step: 1
-    initial_value: 0
-    restore_value: true
-    icon: mdi:led-on
-    unit_of_measurement: "%"
-    optimistic: true
-    on_value:
-      - script.execute: light_debounce_manual
 
   # Light — schedule
   # Note: ramp value 90 min is forbidden (0x5a = BLE frame header byte).
