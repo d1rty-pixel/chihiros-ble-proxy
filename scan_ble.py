@@ -155,6 +155,11 @@ def classify(name: str) -> tuple[str, str] | None:
     return ("Unknown Chihiros", "?") if name.startswith("DY") else None
 
 
+def should_autoconnect(entry: Entry) -> bool:
+    """Direct BLE sniff only makes sense for devices that push continuous notifications."""
+    return entry.info is None or entry.info[1] in ("fan_mac", "?")
+
+
 def signal_bar(rssi: int, w: int = 5) -> str:
     filled = max(0, min(w, round((rssi + 100) * w / 60)))
     return "█" * filled + "░" * (w - filled)
@@ -451,7 +456,10 @@ def _draw_sniff(stdscr, app, height, width, put, hline,
     sniff_title = f" BLE Sniffer — {mac_str}  {name_str}"
     conn_status = f" {app.sniff_status} "
     put(6, 0, sniff_title, curses.color_pair(C_CONN) | curses.A_BOLD)
-    if "connected" in app.sniff_status and "error" not in app.sniff_status:
+    if app.sniff_status in ("passive", "released"):
+        dot = "○"
+        status_attr = curses.color_pair(C_MUTED) | curses.A_DIM
+    elif "connected" in app.sniff_status and "error" not in app.sniff_status:
         dot = "◉"
         status_attr = curses.color_pair(C_KNOWN) | curses.A_BOLD
     else:
@@ -484,6 +492,13 @@ def _draw_sniff(stdscr, app, height, width, put, hline,
 
     # Clamp scroll so it never exceeds available packets
     app.sniff_scroll = max(0, min(app.sniff_scroll, max(0, total_pkts - max_pkt_rows)))
+
+    # Passive mode: no connection attempted, show help text
+    if app.sniff_status == "passive" and not app.sniff_packets:
+        put(pkt_top,     4, "Dieses Gerät wird vom ESP32 verwaltet.",        curses.color_pair(C_MUTED))
+        put(pkt_top + 1, 4, "Protokollverkehr sichtbar mit:",                curses.color_pair(C_MUTED))
+        put(pkt_top + 2, 6, "esphome logs chihiros-ble-proxy.yaml",          curses.color_pair(C_UNKNOWN) | curses.A_BOLD)
+        put(pkt_top + 4, 4, "Space → direkt verbinden (sperrt Smartphone)",  curses.color_pair(C_MUTED) | curses.A_DIM)
 
     # Which slice to show (tail unless scrolled up)
     start = max(0, total_pkts - max_pkt_rows - app.sniff_scroll)
@@ -525,7 +540,7 @@ def _draw_sniff(stdscr, app, height, width, put, hline,
 
     # ── Status bar ────────────────────────────────────────────────────────────
     left = f" {total_pkts} packet(s)"
-    keys = " ↑↓ scroll · ESC back to scanner · Q quit "
+    keys = " ↑↓ scroll · Space release/connect · ESC back · Q quit "
     bar_row = height - 1
     try:
         stdscr.addstr(bar_row, 0, " " * (width - 1), curses.color_pair(C_BAR))
@@ -571,6 +586,8 @@ def handle_key(app: App, key: int) -> str | None:
         elif key == 27:                          # ESC → back to scan
             app.mode = MODE_SCAN
             return "stop_sniff"
+        elif key == ord(" "):                    # Space → release / reconnect
+            return "toggle_sniff"
         elif key == curses.KEY_UP:
             app.sniff_scroll += 1
         elif key == curses.KEY_DOWN:
@@ -583,8 +600,21 @@ def handle_key(app: App, key: int) -> str | None:
 
 async def run(app: App, stdscr: curses.window) -> None:
     ble_scanner = BleakScanner(detection_callback=app.on_adv)
-    await ble_scanner.start()
+    scanning = False
 
+    async def start_scan() -> None:
+        nonlocal scanning
+        if not scanning:
+            await ble_scanner.start()
+            scanning = True
+
+    async def stop_scan() -> None:
+        nonlocal scanning
+        if scanning:
+            await ble_scanner.stop()
+            scanning = False
+
+    await start_scan()
     sniff_task: asyncio.Task | None = None
 
     try:
@@ -595,12 +625,48 @@ async def run(app: App, stdscr: curses.window) -> None:
             if action == "start_sniff":
                 if sniff_task:
                     sniff_task.cancel()
-                sniff_task = asyncio.create_task(sniff_connect(app))
+                    try:
+                        await sniff_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                await stop_scan()
+                if should_autoconnect(app.sniff_target):
+                    sniff_task = asyncio.create_task(sniff_connect(app))
+                else:
+                    app.sniff_status = "passive"
 
             elif action == "stop_sniff":
                 if sniff_task:
                     sniff_task.cancel()
+                    try:
+                        await sniff_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                     sniff_task = None
+                await start_scan()
+
+            elif action == "toggle_sniff":
+                if sniff_task and not sniff_task.done():
+                    sniff_task.cancel()
+                    try:
+                        await sniff_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    sniff_task = None
+                    app.sniff_status = "released"
+                else:
+                    await stop_scan()
+                    sniff_task = asyncio.create_task(sniff_connect(app))
+
+            # Sniff task may finish on its own (disconnect / error)
+            if sniff_task and sniff_task.done():
+                try:
+                    await sniff_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                sniff_task = None
+                if app.mode == MODE_SCAN:
+                    await start_scan()
 
             try:
                 draw(stdscr, app)
@@ -612,7 +678,11 @@ async def run(app: App, stdscr: curses.window) -> None:
     finally:
         if sniff_task:
             sniff_task.cancel()
-        await ble_scanner.stop()
+            try:
+                await sniff_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await stop_scan()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
