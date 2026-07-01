@@ -180,16 +180,21 @@ esp32_ble_tracker:
                 return;
             }
             // Skip devices that are already configured by MAC
-            if (mac == "${co2_mac}"     || mac == "${stirrer_mac}" ||
-                mac == "${light_mac}"   || mac == "${dosing_mac}"  ||
-                mac == "${fan_mac}"     || mac == "${doctor_mac}") return;
-            // Skip auto-discovered devices (no static MAC, but already found)
-            if (id(co2_auto_found)     && name.rfind("DYPCO2", 0) == 0) return;
-            if (id(stirrer_auto_found) && name.rfind("DYMIX",  0) == 0) return;
-            if (id(light_auto_found)   && (name.rfind("DYNT90", 0) == 0 || name.rfind("DYSIL", 0) == 0)) return;
-            if (id(dosing_auto_found)  && name.rfind("DYDOSE", 0) == 0) return;
-            if (id(fan_auto_found)     && name.rfind("DYNFAN", 0) == 0) return;
-            if (id(doctor_auto_found)  && name.rfind("DYNDOC", 0) == 0) return;
+            // Suppress known device types: either a static MAC is configured, or the device
+            // was already auto-discovered. MAC address comparison is intentionally skipped
+            // because Chihiros devices use rotating random BLE addresses.
+            if (${co2_enabled} && (strcmp("${co2_mac}", "00:00:00:00:00:00") != 0 || id(co2_auto_found)) &&
+                name.rfind("DYPCO2", 0) == 0) return;
+            if (${stirrer_enabled} && (strcmp("${stirrer_mac}", "00:00:00:00:00:00") != 0 || id(stirrer_auto_found)) &&
+                name.rfind("DYMIX", 0) == 0) return;
+            if (${light_enabled} && (strcmp("${light_mac}", "00:00:00:00:00:00") != 0 || id(light_auto_found)) &&
+                (name.rfind("DYNT90", 0) == 0 || name.rfind("DYSIL", 0) == 0)) return;
+            if (${dosing_enabled} && (strcmp("${dosing_mac}", "00:00:00:00:00:00") != 0 || id(dosing_auto_found)) &&
+                name.rfind("DYDOSE", 0) == 0) return;
+            if (${fan_enabled} && (strcmp("${fan_mac}", "00:00:00:00:00:00") != 0 || id(fan_auto_found)) &&
+                name.rfind("DYNFAN", 0) == 0) return;
+            if (${doctor_enabled} && (strcmp("${doctor_mac}", "00:00:00:00:00:00") != 0 || id(doctor_auto_found)) &&
+                name.rfind("DYNDOC", 0) == 0) return;
             // Log any other Chihiros device so the user can identify and configure it
             const char* type = "Unknown type";
             if      (name.rfind("DYNT90", 0) == 0 || name.rfind("DYSIL", 0) == 0) type = "WRGB2 light       -> set as light_mac";
@@ -270,7 +275,7 @@ globals:
     restore_value: false
 
   # Auto-discovery flags — set when a device is found via BLE scan (no MAC configured).
-  # Reset on reboot; the next advertisement will trigger re-discovery.
+  # Reset when too many consecutive connection failures occur, enabling re-discovery.
   - id: co2_auto_found
     type: bool
     restore_value: false
@@ -295,6 +300,36 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+
+  # Consecutive disconnect counters — reset on successful on_connect, incremented on every
+  # on_disconnect. A normal connect+send+disconnect cycle increments from 0 to 1 and then
+  # resets to 0 on the next successful connect. If on_connect never fires (failed attempt),
+  # the counter keeps climbing. At 4 (= 1 intentional + 3 failed) the auto-discovery flag
+  # is cleared so the next advertisement triggers fresh discovery.
+  - id: co2_connect_fails
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: stirrer_connect_fails
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: light_connect_fails
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: dosing_connect_fails
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: fan_connect_fails
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: doctor_connect_fails
+    type: int
+    restore_value: false
+    initial_value: '0'
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LIGHT PERIOD SCHEDULE
@@ -450,6 +485,7 @@ ble_client:
       then:
         - delay: 500ms
         - lambda: |-
+            id(co2_connect_fails) = 0;
             id(co2_device).prepare(
               id(ntp_time).now(), id(co2_schedule_enabled),
               id(light_period_start).hour, id(light_period_start).minute,
@@ -470,6 +506,12 @@ ble_client:
         - logger.log: "co2: done"
     on_disconnect:
       then:
+        - lambda: |-
+            id(co2_connect_fails)++;
+            if (id(co2_connect_fails) >= 4 && id(co2_auto_found)) {
+                id(co2_auto_found) = false;
+                ESP_LOGW("co2", "Repeated connection failures — resetting auto-discovery");
+            }
         - logger.log: "co2: disconnected"
 
   # ── Stirrer ──
@@ -479,6 +521,7 @@ ble_client:
       then:
         - delay: 500ms
         - lambda: |-
+            id(stirrer_connect_fails) = 0;
             uint8_t uur[]  = {(uint8_t)id(stirrer_ch0_start_hour).state, (uint8_t)id(stirrer_ch1_start_hour).state,
                               (uint8_t)id(stirrer_ch2_start_hour).state, (uint8_t)id(stirrer_ch3_start_hour).state};
             uint8_t min_[] = {(uint8_t)id(stirrer_ch0_start_min).state, (uint8_t)id(stirrer_ch1_start_min).state,
@@ -508,6 +551,12 @@ ble_client:
         - logger.log: "stirrer: done"
     on_disconnect:
       then:
+        - lambda: |-
+            id(stirrer_connect_fails)++;
+            if (id(stirrer_connect_fails) >= 4 && id(stirrer_auto_found)) {
+                id(stirrer_auto_found) = false;
+                ESP_LOGW("stirrer", "Repeated connection failures — resetting auto-discovery");
+            }
         - logger.log: "stirrer: disconnected"
 
   # ── WRGB2 Light ──
@@ -517,6 +566,7 @@ ble_client:
       then:
         - delay: 500ms
         - lambda: |-
+            id(light_connect_fails) = 0;
             id(light_device).prepare(
               id(ntp_time).now(), id(light_auto_mode),
               id(light_period_start).hour, id(light_period_start).minute,
@@ -540,6 +590,12 @@ ble_client:
         - logger.log: "light: done"
     on_disconnect:
       then:
+        - lambda: |-
+            id(light_connect_fails)++;
+            if (id(light_connect_fails) >= 4 && id(light_auto_found)) {
+                id(light_auto_found) = false;
+                ESP_LOGW("light", "Repeated connection failures — resetting auto-discovery");
+            }
         - logger.log: "light: disconnected"
 
   # ── Dosing pump ──
@@ -549,6 +605,7 @@ ble_client:
       then:
         - delay: 500ms
         - lambda: |-
+            id(dosing_connect_fails) = 0;
             bool    actief[]   = {id(sw_dosing_schedule_p1).state, id(sw_dosing_schedule_p2).state,
                                   id(sw_dosing_schedule_p3).state, id(sw_dosing_schedule_p4).state};
             uint8_t weekdays[] = {(uint8_t)id(num_dosing_weekdays_p1).state, (uint8_t)id(num_dosing_weekdays_p2).state,
@@ -576,6 +633,12 @@ ble_client:
         - logger.log: "dosing: done"
     on_disconnect:
       then:
+        - lambda: |-
+            id(dosing_connect_fails)++;
+            if (id(dosing_connect_fails) >= 4 && id(dosing_auto_found)) {
+                id(dosing_auto_found) = false;
+                ESP_LOGW("dosing", "Repeated connection failures — resetting auto-discovery");
+            }
         - logger.log: "dosing: disconnected"
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -588,6 +651,7 @@ ble_client:
       then:
         - delay: 500ms
         - lambda: |-
+            id(fan_connect_fails) = 0;
             id(fan_device).prepare(
               id(ntp_time).now(), id(fan_silent_mode),
               (uint8_t)id(num_fan_start_temp).state,
@@ -609,6 +673,12 @@ ble_client:
         - logger.log: "fan: done"
     on_disconnect:
       then:
+        - lambda: |-
+            id(fan_connect_fails)++;
+            if (id(fan_connect_fails) >= 4 && id(fan_auto_found)) {
+                id(fan_auto_found) = false;
+                ESP_LOGW("fan", "Repeated connection failures — resetting auto-discovery");
+            }
         - logger.log: "fan: disconnected"
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -621,6 +691,7 @@ ble_client:
       then:
         - delay: 500ms
         - lambda: |-
+            id(doctor_connect_fails) = 0;
             id(doctor_device).prepare(
               id(ntp_time).now(),
               id(num_doctor_tds).state,
@@ -640,6 +711,12 @@ ble_client:
         - logger.log: "doctor: done"
     on_disconnect:
       then:
+        - lambda: |-
+            id(doctor_connect_fails)++;
+            if (id(doctor_connect_fails) >= 4 && id(doctor_auto_found)) {
+                id(doctor_auto_found) = false;
+                ESP_LOGW("doctor", "Repeated connection failures — resetting auto-discovery");
+            }
         - logger.log: "doctor: disconnected"
 
 # ── Interval ──────────────────────────────────────────────────────────────────
